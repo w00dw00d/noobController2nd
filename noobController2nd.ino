@@ -34,6 +34,11 @@ void setup() {
   SPI.setBitOrder(MSBFIRST);          // ビットオーダー
   SPI.setClockDivider(SPI_CLOCK_DIV8);// クロック(CLK)をシステムクロックの1/8で使用(16MHz/8)
   SPI.setDataMode(SPI_MODE0);         // クロック極性０(LOW)　クロック位相０
+
+  m_mainPrf.id = -1;
+  m_mainPrf.type = -1;
+  m_subPrf.id = -1;
+  m_subPrf.type = -1;
 }
 
 void loop() {
@@ -56,10 +61,14 @@ void loop() {
       }
       id = getModeFromSerial();
       if (id == -1) {
-        Serial1.print(ERR_DATAERR_CODE);
-        return;
+        //no macro
+        prf.id = -1;
+        prf.type = -1;
+      } else {
+        //macro
+        prf = getProfileFromEeprom(id);
       }
-      prf = getProfileFromEeprom(id);
+
       if (main_sub == SET_PROFILE_MAIN) {
         m_mainPrf = prf;
         Serial.println("main");
@@ -67,7 +76,7 @@ void loop() {
         m_subPrf = prf;
         Serial.println("sub");
       }
-      //for test
+
       printProfileToSerial(prf);
       break;
     case SAVE_PROFILE:
@@ -320,7 +329,6 @@ bool deleteProfile(int id) {
 // 反動制御の強さ（縦）
 // 反動制御の強さ（横）
 // ボタンをおしている時間
-// 反動制御の取り消し（0入力）
 // ボタンを離している時間
 //
 // ・セミオートリココン
