@@ -3,8 +3,11 @@
 #include <types.h>
 #include <pt.h>
 
-#define SPI_LDAC   9              // ラッチ動作出力ピン
-#define SPI_SS   10              // ラッチ動作出力ピン
+#define DIN_TEST 21              // In Test A3
+#define DIN_R2   20              // In R2 A2
+#define DOUT_R2   9              // Out R2
+#define SPI_LDAC  8              // ラッチ動作出力ピン
+#define SPI_SS   10              // SSピン
 
 const int SET_PROFILE = 0;
 const int LOAD_PROFILE = 1;
@@ -27,8 +30,12 @@ void setup() {
   while (!Serial1);
 
   // 制御するピンは全て出力に設定する
-  pinMode(SPI_LDAC,OUTPUT);
-  pinMode(SPI_SS,OUTPUT);
+  pinMode(13, OUTPUT);
+  pinMode(SPI_LDAC, OUTPUT);
+  pinMode(SPI_SS, OUTPUT);
+  pinMode(DIN_R2, INPUT_PULLUP);
+  pinMode(DIN_TEST, INPUT_PULLUP);
+  pinMode(DOUT_R2, OUTPUT);
   // SPIの初期化処理を行う
   SPI.begin() ;                       // ＳＰＩを行う為の初期化
   SPI.setBitOrder(MSBFIRST);          // ビットオーダー
@@ -42,9 +49,79 @@ void setup() {
 }
 
 void loop() {
-  //for test
-  while (!Serial1.available());
+  //バッファにデータが届いたら処理開始
+  if (Serial1.available()) startSerialCommunication();
+  controllR2Trigger();
+}
 
+void controllR2Trigger() {
+  int MAX_COUNT = 0;
+  const int FREQUENCY_COEFFICIENT = 7812;
+//for test s
+  int RPM = 1000;
+  MAX_COUNT = FREQUENCY_COEFFICIENT / (RPM / 60);
+//for test e
+  if (digitalRead(DIN_R2) == LOW) {
+    ledOut(0);
+    if (digitalRead(DIN_TEST)) {
+      digitalWrite(13, LOW);
+      digitalWrite(DOUT_R2, LOW);
+
+      while (digitalRead(DIN_R2) == LOW);
+    } else {
+      digitalWrite(13, HIGH);
+      //digitalWrite(13, HIGH);
+      // OC1A(PB1/D9) toggle
+      TCCR1A &= ~(1<<COM1A1);     // 0
+      TCCR1A |=  (1<<COM1A0);     // 1
+
+      // WGM13-10 = 0100 CTCモード
+      TCCR1B &= ~(1<<WGM13);      // 0
+      TCCR1B |=  (1<<WGM12);      // 1
+      TCCR1A &= ~(1<<WGM11);      // 0
+      TCCR1A &= ~(1<<WGM10);      // 0
+      OCR1A = MAX_COUNT;             // コンペア値
+
+      TCNT1 = 0x0000;
+
+      // ClockSource CS12-CS10 = 101 16MHz / 1024 T= 64us
+      TCCR1B |=  (1<<CS12);       // 1
+      TCCR1B &= ~(1<<CS11);       // 0
+      TCCR1B |=  (1<<CS10);       // 1
+
+      while (digitalRead(DIN_R2) == LOW);
+    }
+  } else {
+    ledOut(4000);
+    if (bit_is_set(TCCR1B, CS12)) {
+      TCCR1A |=  (1<<COM1A1);     // 1
+      TCCR1A &= ~(1<<COM1A0);     // 0
+      TCNT1=OCR1A-1;
+
+      // ClockSource CS12-CS10 = 101 16MHz / 1024 T= 64us
+      TCCR1B &= ~(1<<CS12);       // 0
+      TCCR1B &= ~(1<<CS11);       // 0
+      TCCR1B &= ~(1<<CS10);       // 0
+
+      // OC1A(PB1/D9) toggle
+
+      TCCR1A &= ~(1<<COM1A1);     // 0
+      TCCR1A &= ~(1<<COM1A0);     // 0
+
+      // WGM13-10 = 0100 CTCモード
+      TCCR1B &= ~(1<<WGM13);      // 0
+      TCCR1B &= ~(1<<WGM12);      // 0
+      TCCR1A &= ~(1<<WGM11);      // 0
+      TCCR1A &= ~(1<<WGM10);      // 0
+      OCR1A = MAX_COUNT;             // コンペア値
+
+      TCNT1 = 0x0000;
+    }
+    digitalWrite(DOUT_R2, HIGH);
+  }
+}
+
+void startSerialCommunication() {
   int mode = getModeFromSerial();
   int main_sub = 0;
   int id = -1;
@@ -71,56 +148,42 @@ void loop() {
 
       if (main_sub == SET_PROFILE_MAIN) {
         m_mainPrf = prf;
-        Serial.println("main");
       } else if (main_sub == SET_PROFILE_SUB) {
         m_subPrf = prf;
-        Serial.println("sub");
       }
 
       printProfileToSerial(prf);
       break;
     case SAVE_PROFILE:
-      //for test
-      //Serial.println("SAVE_PROFILE");
-      getProfileFromSerial(prf);
-      setProfileToEeprom(prf);
+      if (!getProfileFromSerial(prf)) return;
+      if (!setProfileToEeprom(prf)) return;
 
-      //for test
       prf = getProfileFromEeprom(prf.id);
       printProfileToSerial(prf);
       break;
     case DELETE_PROFILE:
-      //for test
-      //Serial.println("DELETE_PROFILE");
       //idを読み込む
       id = getModeFromSerial();
       if (id == -1) {
-        //for test
         Serial1.print(ERR_DATAERR_CODE);
-        //Serial.println(id);
         return;
       }
       deleteProfile(id);
-      //for test s
       prf = getProfileFromEeprom(id);
       printProfileToSerial(prf);
-      //for test e
       break;
     //規定外
     default:
-      //for test
-      //Serial.println("Invalid Mode");
       Serial1.print(ERR_DATAERR_CODE);
       break;
   }
 }
 
 int getModeFromSerial() {
-  //if (!Serial1.available()) return false;
   int mode = -1;
   String errCode = "";
   char tmp;
-  const unsigned long timeout = 10000;
+  const unsigned long timeout = 1000;
   unsigned long starttime = millis();
 
   //開始文字
@@ -129,27 +192,18 @@ int getModeFromSerial() {
   if (!getIntFromSerial(mode, errCode, timeout, starttime)) goto err;
   //終了文字
   Serial1.read();
-
-//for test s
-//  Serial.print("input : ");
-//  Serial.println(mode);
-//for test e
   return mode;
 
   err:
   while (Serial1.available()) Serial1.read();
-//for test s
   Serial1.println(errCode);
-//for test e
   return mode;
 }
 
 bool getProfileFromSerial(profile &prf) {
-  //if (!Serial1.available()) return false;
-
   String errCode = "";
   char tmp;
-  const unsigned long timeout = 10000;
+  const unsigned long timeout = 1000;
   unsigned long starttime = millis();
 
   //開始文字
@@ -166,18 +220,12 @@ bool getProfileFromSerial(profile &prf) {
   //終了文字
   Serial1.read();
 
-//for test s
-  // Serial1.println("input");
-  // printProfileToSerial(prf);
-  // Serial1.println("end");
-//for test e
   return true;
 
   err:
   while (Serial1.available()) Serial1.read();
-//for test s
+  prf.id = -1;
   Serial1.println(errCode);
-//for test e
   return false;
 }
 
