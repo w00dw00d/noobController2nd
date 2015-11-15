@@ -3,12 +3,24 @@
 #include <types.h>
 #include <pt.h>
 
-#define DIN_TEST  21              // In Test A3
-#define DIN_R2    20              // In R2 A2
-#define DOUT_R2    9              // Out R2
-#define SPI_LDAC   8              // ラッチ動作出力ピン
-#define SPI_SS    10              // SSピン
-#define DOUT_BEEP 12              // Out R2
+#define DOUT_BEEP 12              // BEEP
+#define DOUT_RED   5              // LED
+#define DOUT_BLUE  6              // LED
+#define DOUT_GREEN 10             // LED
+#define AIN_X       0             // X軸
+#define AIN_Y       1             // Y軸
+
+//register INPUT
+#define DIN_R2       4            // PD4 D4
+#define DIN_L2       6            // PE6 D7
+#define DIN_TRIANGLE 4            // PF4 A3
+#define DIN_RESET    1            // PF1 A4
+#define DIN_NO_MACRO 0            // PF0 A5
+
+//register OUTPUT
+#define DOUT_R2    5              // PB5 D9
+#define SPI_LDAC   4              // PB4 D8
+#define SPI_SS     7              // PB7 D11
 
 #define SET_PROFILE 0
 #define LOAD_PROFILE 1
@@ -17,6 +29,11 @@
 
 #define SET_PROFILE_MAIN 1
 #define SET_PROFILE_SUB 2
+
+#define MACRO_TYPE_NO_MACRO -1
+#define MACRO_TYPE_FULLAUTO 1
+#define MACRO_TYPE_SEMIAUTO 2
+#define MACRO_TYPE_RAPID_FIRE 3
 
 #define START_TAG '{'
 #define END_TAG '}'
@@ -32,103 +49,271 @@
 #define TONE_RA 440     // ラ
 #define TONE_SI 494     // シ
 #define TONE_D2 523     // ド
+#define TONE_LENGTH 100     // 時間(ms)
 
 struct profile m_mainPrf;
 struct profile m_subPrf;
+
+static struct pt mPt1, mPt2;
+static int mRx, mRy;
+static bool mIsMainWeapon;
+static bool mIsMacroEnable;
+
+void outputToDac(unsigned int destination, unsigned int value) {
+  PORTB |= _BV(SPI_LDAC); //H
+  PORTB &= ~_BV(SPI_SS);  //L
+  SPI.transfer((value >> 8) | (0x30 | destination << 8)); // Highバイト(0x30=OUTA/BUFなし/1x/シャットダウンなし)
+  SPI.transfer(value & 0xff);        // Lowバイトの出力
+  PORTB |= _BV(SPI_SS);    //H
+  PORTB &= ~_BV(SPI_LDAC); //L DA_LDAC
+}
+
+void controlRightStick() {
+  static int val = 0.0;
+  const int STICK_IS_CENTER = 1925.0;
+  //X軸
+  //リコイルコントロールと同じ方向のスティック入力値を減らす
+  val = analogRead(AIN_X) / 1024.0 * 4095.0;
+  if (mRx > 0.0 && val > (STICK_IS_CENTER)) {
+    val = STICK_IS_CENTER + ((val - STICK_IS_CENTER) * 0.8);
+  } else if (mRx < 0.0 && val < (STICK_IS_CENTER)) {
+    val = STICK_IS_CENTER - ((STICK_IS_CENTER - val) * 0.8);
+  }
+
+  val += mRx;
+  if (val < 0.0) val = 0.0;
+  if (val > 4095.0) val = 4095.0;
+  outputToDac(0.0, val) ;
+
+  //Y軸
+  val = analogRead(AIN_Y) / 1024.0 * 4095.0;
+  //リコイルコントロール中はスティックの下入力の値を減らす
+  if (mRy != 0.0 && val > (STICK_IS_CENTER)) {
+    val = STICK_IS_CENTER + ((val - STICK_IS_CENTER) * 0.6);
+  }
+  val += mRy;
+  if (val > 4095.0) val = 4095.0;
+  outputToDac(1.0, val) ;
+}
+
+void noMacro() {
+  if (bit_is_clear(PIND, DIN_R2)) PORTB &= ~_BV(DOUT_R2); //L
+  else                            PORTB |= _BV(DOUT_R2);  //H
+}
+
+static int fullAutoRecoilControll(struct pt *pt, profile prof) {
+  static unsigned long timestamp = 0;
+  PT_BEGIN(pt);
+  if (bit_is_clear(PIND, DIN_R2)) {
+    PORTB &= ~_BV(DOUT_R2); //L
+
+    mRy = prof.val1;
+    mRx = prof.val2;
+    timestamp = millis();
+    PT_WAIT_UNTIL(pt, millis() - timestamp > prof.val3 || bit_is_set(PIND, DIN_R2));
+    if (bit_is_set(PIND, DIN_R2)) break;
+
+    mRy = prof.val4;
+    mRx = prof.val5;
+    PT_WAIT_UNTIL(pt, bit_is_set(PIND, DIN_R2));
+  }
+  mRy = 0;
+  mRx = 0;
+  PORTB |= _BV(DOUT_R2); //H
+  PT_END(pt);
+}
+
+static int semiAutoRecoilControll(struct pt *pt, profile prof) {
+  static unsigned long timestamp = 0;
+  PT_BEGIN(pt);
+  //timestamp = 0;
+  if (bit_is_clear(PIND, DIN_R2)) {
+    PORTB &= ~_BV(DOUT_R2); //L
+    mRy = prof.val1;
+    mRx = prof.val2;
+    timestamp = millis();
+    PT_WAIT_UNTIL(pt, millis() - timestamp > prof.val3);
+  }
+  mRy = 0;
+  mRx = 0;
+
+  //ボタンを離すまで待機
+  PT_WAIT_UNTIL(pt, bit_is_set(PIND, DIN_R2));
+  // while (bit_is_clear(PIND, DIN_R2)) {
+  //   timestamp = millis();
+  //   PT_WAIT_UNTIL(pt, millis() - timestamp > 1);
+  // }
+  PORTB |= _BV(DOUT_R2); //H
+
+  PT_END(pt);
+}
+
+static int rapidFireRecoilControll(struct pt *pt, profile prof) {
+  static unsigned long timestamp = 0;
+  PT_BEGIN(pt);
+  if (bit_is_clear(PIND, DIN_R2)) {
+    // OC1A(PB1/D9) toggle
+    // WGM13-10 = 0100 CTCモード
+    // ClockSource CS12-CS10 = 101 16MHz / 1024 T= 64us
+    TCCR1A = 0b01000000;
+    TCCR1B = 0b00001101;
+    OCR1A = prof.val4; // コンペア値
+    TCNT1 = 0x0000;
+
+    mRy = prof.val1;
+    mRx = prof.val2;
+
+    //ボタンを離すまで待機
+    PT_WAIT_UNTIL(pt, bit_is_set(PIND, DIN_R2));
+    // while (bit_is_clear(PIND, DIN_R2)) {
+    //   timestamp = millis();
+    //   PT_WAIT_UNTIL(pt, millis() - timestamp > 1);
+    // }
+  }
+  mRy = 0;
+  mRx = 0;
+  timerOff();
+  PORTB |= _BV(DOUT_R2); //H
+  PT_END(pt);
+}
+
+void timerOff() {
+  //出力をLにする
+  TCCR1A |=  (1<<COM1A1);     // 1
+  TCCR1A &= ~(1<<COM1A0);     // 0
+  TCNT1=OCR1A-1;
+
+  //停止
+  TCCR1A = 0b00000000;
+  TCCR1B = 0b00000000;
+  TCNT1 = 0x0000;
+}
+
+static int getMode(struct pt *pt ) {
+  static unsigned long timestamp = 0;
+  PT_BEGIN(pt);
+
+  if (bit_is_clear(PINF, DIN_RESET)) {
+    mIsMainWeapon = true;
+    setBeepAndLed();
+
+    //ボタンを離すまで待機
+    PT_WAIT_UNTIL(pt, bit_is_set(PINF, DIN_RESET));
+  }
+
+  if (bit_is_clear(PINF, DIN_NO_MACRO)) {
+    mIsMacroEnable = !mIsMacroEnable;
+    setBeepAndLed();
+
+    //ボタンを離すまで待機
+    PT_WAIT_UNTIL(pt, bit_is_set(PINF, DIN_NO_MACRO));
+  }
+
+  if (bit_is_clear(PINF, DIN_TRIANGLE)) {
+    mIsMainWeapon = !mIsMainWeapon;
+    setBeepAndLed();
+
+    //ボタンを離すまで待機
+    PT_WAIT_UNTIL(pt, bit_is_set(PINF, DIN_TRIANGLE));
+  }
+
+  PT_END(pt);
+}
+
+void setBeepAndLed() {
+  unsigned int r, g, b;
+  if(mIsMacroEnable) {
+    if(mIsMainWeapon) {
+      tone(DOUT_BEEP, TONE_DO, TONE_LENGTH);
+      r = 0;
+      g = 255;
+      b = 0;
+    } else {
+      tone(DOUT_BEEP, TONE_FA, TONE_LENGTH);
+      r = 0;
+      g = 0;
+      b = 255;
+    }
+  } else {
+    tone(DOUT_BEEP, TONE_D2, TONE_LENGTH);
+    r = 255;
+    g = 0;
+    b = 0;
+  }
+  analogWrite(DOUT_RED, r);
+  analogWrite(DOUT_GREEN, g);
+  analogWrite(DOUT_BLUE, b);
+}
 
 void setup() {
   Serial1.begin(9600);
   while (!Serial1);
 
-  // 制御するピンは全て出力に設定する
-  pinMode(DOUT_BEEP, OUTPUT);
-  pinMode(SPI_LDAC, OUTPUT);
-  pinMode(SPI_SS, OUTPUT);
-  pinMode(DIN_R2, INPUT_PULLUP);
-  pinMode(DIN_TEST, INPUT_PULLUP);
-  pinMode(DOUT_R2, OUTPUT);
+  //ピンの初期化
+  analogReference(EXTERNAL);  //AREF有効
+  pinMode(8, OUTPUT);         //LDAC
+  pinMode(9, OUTPUT);         //R2 OUT
+  pinMode(11, OUTPUT);        //SS
+  pinMode(DOUT_BEEP, OUTPUT);  //BEEP
+  pinMode(DOUT_RED, OUTPUT);   //RED
+  pinMode(DOUT_BLUE, OUTPUT);  //BLUE
+  pinMode(DOUT_GREEN, OUTPUT); //GREEN
+
+  pinMode(4, INPUT_PULLUP);  //R2 IN
+  pinMode(7, INPUT_PULLUP);  //L2 IN
+  pinMode(21, INPUT);        //TRIANGLE IN
+  pinMode(22, INPUT_PULLUP); //RESET IN
+  pinMode(23, INPUT_PULLUP); //NO MACRO IN
+
+  //精度を犠牲にしてADC高速化
+  ADCSRA = ADCSRA & 0xf8;
+  ADCSRA = ADCSRA | 0x04;
+
   // SPIの初期化処理を行う
   SPI.begin() ;                       // ＳＰＩを行う為の初期化
   SPI.setBitOrder(MSBFIRST);          // ビットオーダー
-  SPI.setClockDivider(SPI_CLOCK_DIV8);// クロック(CLK)をシステムクロックの1/8で使用(16MHz/8)
+  SPI.setClockDivider(SPI_CLOCK_DIV2);// クロック(CLK)をシステムクロックの1/2で使用(16MHz/2)
   SPI.setDataMode(SPI_MODE0);         // クロック極性０(LOW)　クロック位相０
 
   m_mainPrf.id = -1;
   m_mainPrf.type = -1;
   m_subPrf.id = -1;
   m_subPrf.type = -1;
+
+  PT_INIT(&mPt1);
+  PT_INIT(&mPt2);
+  mIsMainWeapon = true;
+  mIsMacroEnable = false;
+  mRx = 0;
+  mRy = 0;
 }
 
 void loop() {
   //バッファにデータが届いたら処理開始
   if (Serial1.available()) startSerialCommunication();
-  controllR2Trigger();
-}
 
-void controllR2Trigger() {
-  int MAX_COUNT = 0;
-  const int FREQUENCY_COEFFICIENT = 7813;
-//for test s
-  int RPM = 1000;
-  MAX_COUNT = FREQUENCY_COEFFICIENT / (RPM / 60);
-//for test e
-  if (digitalRead(DIN_R2) == LOW) {
-    ledOut(0);
-    tone(DOUT_BEEP, TONE_DO, 500);
-    if (digitalRead(DIN_TEST)) {
-      digitalWrite(DOUT_R2, LOW);
-
-      while (digitalRead(DIN_R2) == LOW);
-    } else {
-      //digitalWrite(13, HIGH);
-      // OC1A(PB1/D9) toggle
-      TCCR1A &= ~(1<<COM1A1);     // 0
-      TCCR1A |=  (1<<COM1A0);     // 1
-
-      // WGM13-10 = 0100 CTCモード
-      TCCR1B &= ~(1<<WGM13);      // 0
-      TCCR1B |=  (1<<WGM12);      // 1
-      TCCR1A &= ~(1<<WGM11);      // 0
-      TCCR1A &= ~(1<<WGM10);      // 0
-      OCR1A = MAX_COUNT;             // コンペア値
-
-      TCNT1 = 0x0000;
-
-      // ClockSource CS12-CS10 = 101 16MHz / 1024 T= 64us
-      TCCR1B |=  (1<<CS12);       // 1
-      TCCR1B &= ~(1<<CS11);       // 0
-      TCCR1B |=  (1<<CS10);       // 1
-
-      while (digitalRead(DIN_R2) == LOW);
-    }
+  struct profile currentProfile;
+  if(mIsMainWeapon) {
+    currentProfile = m_mainPrf;
   } else {
-    ledOut(4000);
-    if (bit_is_set(TCCR1B, CS12)) {
-      TCCR1A |=  (1<<COM1A1);     // 1
-      TCCR1A &= ~(1<<COM1A0);     // 0
-      TCNT1=OCR1A-1;
-
-      // ClockSource CS12-CS10 = 101 16MHz / 1024 T= 64us
-      TCCR1B &= ~(1<<CS12);       // 0
-      TCCR1B &= ~(1<<CS11);       // 0
-      TCCR1B &= ~(1<<CS10);       // 0
-
-      // OC1A(PB1/D9) toggle
-
-      TCCR1A &= ~(1<<COM1A1);     // 0
-      TCCR1A &= ~(1<<COM1A0);     // 0
-
-      // WGM13-10 = 0100 CTCモード
-      TCCR1B &= ~(1<<WGM13);      // 0
-      TCCR1B &= ~(1<<WGM12);      // 0
-      TCCR1A &= ~(1<<WGM11);      // 0
-      TCCR1A &= ~(1<<WGM10);      // 0
-      OCR1A = MAX_COUNT;             // コンペア値
-
-      TCNT1 = 0x0000;
-    }
-    digitalWrite(DOUT_R2, HIGH);
+    currentProfile = m_subPrf;
   }
+
+  switch(currentProfile.type) {
+    case MACRO_TYPE_FULLAUTO:
+      fullAutoRecoilControll(&mPt1, currentProfile);
+      break;
+    case MACRO_TYPE_SEMIAUTO:
+      semiAutoRecoilControll(&mPt1, currentProfile);
+      break;
+    case MACRO_TYPE_RAPID_FIRE:
+      rapidFireRecoilControll(&mPt1, currentProfile);
+      break;
+    default:
+      noMacro();
+  }
+  controlRightStick();
+  getMode(&mPt2);
 }
 
 void startSerialCommunication() {
@@ -305,15 +490,6 @@ dataerr:
 timeout:
   if (errCode == "") errCode = ERR_TIMEOUT_CODE;
   return false;
-}
-
-void ledOut(int val) { //0 ~ 4095
-  digitalWrite(SPI_LDAC,HIGH);
-  digitalWrite(SPI_SS,LOW);
-  SPI.transfer((val >> 8) | 0x30); // Highバイト(0x30=OUTA/BUFなし/1x/シャットダウンなし)
-  SPI.transfer(val & 0xff);        // Lowバイトの出力
-  digitalWrite(SPI_SS,HIGH);
-  digitalWrite(SPI_LDAC,LOW);        // ラッチ信号を出す
 }
 
 void writeEepromInt(int addr, int i) {
