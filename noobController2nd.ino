@@ -3,25 +3,36 @@
 #include <types.h>
 #include <pt.h>
 
-#define DIN_TEST 21              // In Test A3
-#define DIN_R2   20              // In R2 A2
-#define DOUT_R2   9              // Out R2
-#define SPI_LDAC  8              // ラッチ動作出力ピン
-#define SPI_SS   10              // SSピン
+#define DIN_TEST  21              // In Test A3
+#define DIN_R2    20              // In R2 A2
+#define DOUT_R2    9              // Out R2
+#define SPI_LDAC   8              // ラッチ動作出力ピン
+#define SPI_SS    10              // SSピン
+#define DOUT_BEEP 12              // Out R2
 
-const int SET_PROFILE = 0;
-const int LOAD_PROFILE = 1;
-const int SAVE_PROFILE = 2;
-const int DELETE_PROFILE = 3;
+#define SET_PROFILE 0
+#define LOAD_PROFILE 1
+#define SAVE_PROFILE 2
+#define DELETE_PROFILE 3
 
-const int SET_PROFILE_MAIN = 1;
-const int SET_PROFILE_SUB = 2;
+#define SET_PROFILE_MAIN 1
+#define SET_PROFILE_SUB 2
 
-const char START_TAG = '{';
-const char END_TAG = '}';
-const char DIVIDE_TAG = ',';
-const String ERR_TIMEOUT_CODE = "{tout}";
-const String ERR_DATAERR_CODE = "{derr}";
+#define START_TAG '{'
+#define END_TAG '}'
+#define DIVIDE_TAG ','
+#define ERR_TIMEOUT_CODE "{tout}"
+#define ERR_DATAERR_CODE "{derr}"
+
+#define TONE_DO 262     // ド
+#define TONE_RE 294     // レ
+#define TONE_MI 330     // ミ
+#define TONE_FA 349     // ファ
+#define TONE_SO 392     // ソ
+#define TONE_RA 440     // ラ
+#define TONE_SI 494     // シ
+#define TONE_D2 523     // ド
+
 struct profile m_mainPrf;
 struct profile m_subPrf;
 
@@ -30,7 +41,7 @@ void setup() {
   while (!Serial1);
 
   // 制御するピンは全て出力に設定する
-  pinMode(13, OUTPUT);
+  pinMode(DOUT_BEEP, OUTPUT);
   pinMode(SPI_LDAC, OUTPUT);
   pinMode(SPI_SS, OUTPUT);
   pinMode(DIN_R2, INPUT_PULLUP);
@@ -56,20 +67,19 @@ void loop() {
 
 void controllR2Trigger() {
   int MAX_COUNT = 0;
-  const int FREQUENCY_COEFFICIENT = 7812;
+  const int FREQUENCY_COEFFICIENT = 7813;
 //for test s
   int RPM = 1000;
   MAX_COUNT = FREQUENCY_COEFFICIENT / (RPM / 60);
 //for test e
   if (digitalRead(DIN_R2) == LOW) {
     ledOut(0);
+    tone(DOUT_BEEP, TONE_DO, 500);
     if (digitalRead(DIN_TEST)) {
-      digitalWrite(13, LOW);
       digitalWrite(DOUT_R2, LOW);
 
       while (digitalRead(DIN_R2) == LOW);
     } else {
-      digitalWrite(13, HIGH);
       //digitalWrite(13, HIGH);
       // OC1A(PB1/D9) toggle
       TCCR1A &= ~(1<<COM1A1);     // 0
